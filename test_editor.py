@@ -1,0 +1,110 @@
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from editor import App, Gdk, GLib, Gtk, Window, load, parts, save
+
+
+class EditorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        Gtk.init_check()
+        if Gdk.Display.get_default() is None:
+            raise unittest.SkipTest("No display connection; run from a desktop terminal")
+        cls.app = App()
+        cls.app.register(None)
+
+    def setUp(self):
+        self.window = Window(self.app)
+        self.page = self.window.current()
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.texture = Gdk.MemoryTexture.new(2, 2, Gdk.MemoryFormat.R8G8B8A8,
+                                            GLib.Bytes.new(bytes([255, 0, 0, 255]) * 4), 8)
+
+    def tearDown(self):
+        self.window.destroy()
+        self.temp.cleanup()
+
+    def test_roundtrip_and_loss_guard(self):
+        buffer = self.page.buffer
+        buffer.set_text('Before فارسی\n')
+        buffer.place_cursor(buffer.get_end_iter())
+        self.page.insert_image(self.texture)
+        buffer.insert(buffer.get_end_iter(), '\nAfter\ufffc')
+        path = self.root / 'test.jot'
+        save(buffer, path)
+        self.window.open_path(path)
+        self.assertEqual(parts(buffer), parts(self.window.current().buffer))
+        plain = self.root / 'existing.txt'
+        plain.write_text('Keep me')
+        with self.assertRaises(ValueError):
+            save(buffer, plain)
+        self.assertEqual(plain.read_text(), 'Keep me')
+        buffer.set_text('plain\nفارسی')
+        save(buffer, plain)
+        self.assertEqual(load(plain), ['plain\nفارسی'])
+
+    def test_clipboard(self):
+        clipboard = self.page.view.get_clipboard()
+        clipboard.set(self.texture)
+        self.page.view.emit('paste-clipboard')
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not parts(self.page.buffer):
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.01)
+        self.assertIn('png', parts(self.page.buffer)[0])
+
+    def test_invalid_document_does_not_create_tab(self):
+        path = self.root / 'bad.jot'
+        for text in ['{}', '{"format":"image-text-1","parts":[{"png":"!"}]}']:
+            path.write_text(text)
+            count = self.window.tabs.get_n_pages()
+            with self.assertRaises((ValueError, GLib.Error)):
+                self.window.open_path(path)
+            self.assertEqual(self.window.tabs.get_n_pages(), count)
+
+    def test_close_cancel_keeps_modified_tab(self):
+        self.page.buffer.set_text('unsaved')
+        self.window.confirm = lambda page, done: done(False)
+        self.window.tabs.close_page(self.window.tabs.get_selected_page())
+        self.assertEqual(self.window.tabs.get_n_pages(), 1)
+        self.assertTrue(self.page.buffer.get_modified())
+
+
+class StorageTests(unittest.TestCase):
+    def test_storage_without_display(self):
+        buffer = Gtk.TextBuffer()
+        buffer.set_text('Before فارسی\n')
+        image = Gdk.MemoryTexture.new(1, 1, Gdk.MemoryFormat.R8G8B8A8,
+                                      GLib.Bytes.new(bytes([255, 0, 0, 255])), 4)
+        buffer.insert_paintable(buffer.get_end_iter(), image)
+        buffer.insert(buffer.get_end_iter(), '\nAfter\ufffc')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'document.jot'
+            save(buffer, path)
+            restored = Gtk.TextBuffer()
+            for item in load(path):
+                if isinstance(item, str):
+                    restored.insert(restored.get_end_iter(), item)
+                else:
+                    restored.insert_paintable(restored.get_end_iter(), item)
+            self.assertEqual(parts(buffer), parts(restored))
+            plain = path.with_suffix('.txt')
+            plain.write_text('Keep me')
+            with self.assertRaises(ValueError):
+                save(buffer, plain)
+            self.assertEqual(plain.read_text(), 'Keep me')
+            buffer.set_text('text only\nفارسی')
+            save(buffer, plain)
+            self.assertEqual(load(plain), ['text only\nفارسی'])
+            path.write_text('{}')
+            with self.assertRaises(ValueError):
+                load(path)
+            path.write_text('{"format":"image-text-1","parts":[{"png":"!"}]}')
+            with self.assertRaises(ValueError):
+                load(path)
+
+
+if __name__ == '__main__':
+    unittest.main()

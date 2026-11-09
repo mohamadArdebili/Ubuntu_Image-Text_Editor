@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Image Text Editor
+Comment=Edit text with embedded images
+Exec=/usr/bin/python3 /media/mohammad/data/Code/Code/ubuntu_text_editor_customized/editor.py %F
+Icon=org.gnome.TextEditor
+Terminal=false
+Categories=Utility;TextEditor;
