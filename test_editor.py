@@ -71,6 +71,28 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(self.window.tabs.get_n_pages(), 1)
         self.assertTrue(self.page.buffer.get_modified())
 
+    def test_display_options_apply_to_existing_and_new_tabs(self):
+        self.page.buffer.set_text('Wrapped text ' * 30 + '\n\n')
+        self.page.buffer.set_modified(False)
+        original = parts(self.page.buffer)
+        for name in ('line-numbers', 'highlight-current-line'):
+            action = self.window.lookup_action(name)
+            self.assertFalse(action.get_state().get_boolean())
+            action.activate(None)
+            self.assertTrue(action.get_state().get_boolean())
+        other = self.window.new()
+        for page in (self.page, other):
+            self.assertTrue(page.view.numbers.get_visible())
+            self.assertTrue(page.view.highlight_current_line)
+        self.page.buffer.place_cursor(self.page.buffer.get_end_iter())
+        self.assertFalse(self.page.buffer.get_modified())
+        self.assertEqual(parts(self.page.buffer), original)
+        for name in ('line-numbers', 'highlight-current-line'):
+            self.window.lookup_action(name).activate(None)
+        for page in (self.page, other, self.window.new()):
+            self.assertFalse(page.view.numbers.get_visible())
+            self.assertFalse(page.view.highlight_current_line)
+
 
 class StorageTests(unittest.TestCase):
     def test_storage_without_display(self):

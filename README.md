@@ -1,4 +1,4 @@
-# Image Text Editor
+# Ubuntu Image-Text Editor
 
 A small native GTK 4/libadwaita recreation inspired by GNOME Text Editor, with inline images.
 
@@ -32,3 +32,7 @@ Storage checks run without a display. GUI checks cover image clipboard paste, do
 ## Investigation
 
 See [evidence/NOTES.md](evidence/NOTES.md). Extracted upstream UI resources are reference evidence, not loaded by this app.
+
+## Display options
+
+The header menu includes **Display Line Numbers** and **Highlight Current Line**. Both start off and apply to every tab in the current window, including new tabs. Settings last until the window closes. Numbers count document lines, not wrapped rows; the current-line highlight covers the entire logical line. These decorations do not change saved documents.

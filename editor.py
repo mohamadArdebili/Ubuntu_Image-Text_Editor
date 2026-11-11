@@ -8,7 +8,8 @@ import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+gi.require_version('Graphene', '1.0')
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
 
 def parts(buffer):
@@ -61,14 +62,72 @@ def save(buffer, path):
     Gio.File.new_for_path(str(path)).replace_contents(text.encode('utf-8'), None, False, Gio.FileCreateFlags.NONE, None)
 
 
+class LineNumbers(Gtk.Widget):
+    def __init__(self, view):
+        super().__init__(can_target=False)
+        self.view = view
+
+    def do_snapshot(self, snapshot):
+        view = self.view
+        visible = view.get_visible_rect()
+        pos, _ = view.get_line_at_y(visible.y)
+        color = view.get_color()
+        color.alpha = 0.55
+        while True:
+            y, _ = view.get_line_yrange(pos)
+            if y > visible.y + visible.height:
+                break
+            _, window_y = view.buffer_to_window_coords(Gtk.TextWindowType.LEFT, 0, y)
+            layout = view.create_pango_layout(str(pos.get_line() + 1))
+            width, _ = layout.get_pixel_size()
+            snapshot.save()
+            snapshot.translate(Graphene.Point().init(self.get_width() - width - 10, window_y))
+            snapshot.append_layout(layout, color)
+            snapshot.restore()
+            if pos.get_line() == view.get_buffer().get_line_count() - 1:
+                break
+            pos.forward_line()
+
+
+class EditorView(Gtk.TextView):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.highlight_current_line = False
+        self.numbers = LineNumbers(self)
+        self.set_gutter(Gtk.TextWindowType.LEFT, self.numbers)
+        self.get_buffer().connect('changed', self.refresh_decorations)
+        self.get_buffer().connect('notify::cursor-position', self.refresh_decorations)
+
+    def refresh_decorations(self, *_):
+        digits = len(str(self.get_buffer().get_line_count()))
+        width, _ = self.create_pango_layout('0' * digits).get_pixel_size()
+        self.numbers.set_size_request(width + 20, -1)
+        self.numbers.queue_draw()
+        self.queue_draw()
+
+    def do_snapshot_layer(self, layer, snapshot):
+        if layer == Gtk.TextViewLayer.BELOW_TEXT and self.highlight_current_line:
+            buffer = self.get_buffer()
+            pos = buffer.get_iter_at_mark(buffer.get_insert())
+            y, height = self.get_line_yrange(pos)
+            visible = self.get_visible_rect()
+            color = self.get_color()
+            color.alpha = 0.07
+            snapshot.append_color(color, Graphene.Rect().init(visible.x, y, visible.width, height))
+
+
 class Page(Gtk.ScrolledWindow):
     def __init__(self, owner):
         super().__init__(hexpand=True, vexpand=True)
         self.owner, self.path = owner, None
         self.buffer = Gtk.TextBuffer(enable_undo=True)
-        self.view = Gtk.TextView(buffer=self.buffer, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+        self.view = EditorView(buffer=self.buffer, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                  left_margin=30, right_margin=30, top_margin=24, bottom_margin=24)
+        self.view.numbers.set_visible(owner.lookup_action('line-numbers').get_state().get_boolean())
+        self.view.highlight_current_line = owner.lookup_action('highlight-current-line').get_state().get_boolean()
+        self.view.refresh_decorations()
         self.set_child(self.view)
+        self.get_vadjustment().connect('value-changed', self.view.refresh_decorations)
         self.view.connect('paste-clipboard', self.paste)
         self.buffer.connect('modified-changed', lambda *_: self.title())
         self.buffer.connect('notify::cursor-position', lambda *_: owner.position(self))
@@ -119,6 +178,13 @@ class Window(Adw.ApplicationWindow):
         menu = Gio.Menu()
         for label, action in [('Save As…', 'save-as'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
             menu.append(label, 'win.' + action)
+        for label, name in [('Display Line Numbers', 'line-numbers'),
+                            ('Highlight Current Line', 'highlight-current-line')]:
+            action = Gio.SimpleAction.new_stateful(name, None, GLib.Variant('b', False))
+            action.connect('activate', lambda a, p: a.change_state(GLib.Variant('b', not a.get_state().get_boolean())))
+            action.connect('change-state', self.display_option)
+            self.add_action(action)
+            menu.append(label, 'win.' + name)
         bar.pack_end(Gtk.MenuButton(icon_name='open-menu-symbolic', menu_model=menu))
         tabbar = Adw.TabBar(view=self.tabs, autohide=True)
         self.search = Gtk.SearchEntry(placeholder_text='Find text', hexpand=True)
@@ -146,6 +212,16 @@ class Window(Adw.ApplicationWindow):
                 app.set_accels_for_action('win.' + name, [shortcuts[name]])
         self.connect('close-request', self.close_window)
         self.new()
+
+    def display_option(self, action, state):
+        action.set_state(state)
+        for i in range(self.tabs.get_n_pages()):
+            view = self.tabs.get_nth_page(i).get_child().view
+            if action.get_name() == 'line-numbers':
+                view.numbers.set_visible(state.get_boolean())
+            else:
+                view.highlight_current_line = state.get_boolean()
+            view.refresh_decorations()
 
     def current(self):
         tab = self.tabs.get_selected_page()
