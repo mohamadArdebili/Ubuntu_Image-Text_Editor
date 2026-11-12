@@ -1,8 +1,9 @@
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
-from editor import App, Gdk, GLib, Gtk, Window, load, parts, save
+from editor import App, Gdk, GLib, Gtk, Window, load, parts, save, load_preferences, save_preferences
 
 
 class EditorTests(unittest.TestCase):
@@ -15,10 +16,13 @@ class EditorTests(unittest.TestCase):
         cls.app.register(None)
 
     def setUp(self):
-        self.window = Window(self.app)
-        self.page = self.window.current()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        config = patch('editor.GLib.get_user_config_dir', return_value=str(self.root))
+        config.start()
+        self.addCleanup(config.stop)
+        self.window = Window(self.app)
+        self.page = self.window.current()
         self.texture = Gdk.MemoryTexture.new(2, 2, Gdk.MemoryFormat.R8G8B8A8,
                                             GLib.Bytes.new(bytes([255, 0, 0, 255]) * 4), 8)
 
@@ -106,8 +110,39 @@ class EditorTests(unittest.TestCase):
             self.assertFalse(page.view.numbers.get_visible())
             self.assertFalse(page.view.highlight_current_line)
 
+    def test_display_options_survive_window_restart(self):
+        for name in ('line-numbers', 'highlight-current-line'):
+            self.window.lookup_action(name).activate(None)
+        self.window.destroy()
+        self.window = Window(self.app)
+        for name in ('line-numbers', 'highlight-current-line'):
+            self.assertTrue(self.window.lookup_action(name).get_state().get_boolean())
+        self.assertTrue(self.window.current().view.numbers.get_visible())
+        self.assertTrue(self.window.current().view.highlight_current_line)
+        self.assertFalse(self.window.current().buffer.get_modified())
+
 
 class StorageTests(unittest.TestCase):
+    def test_preferences_roundtrip_and_invalid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config/settings.json'
+            defaults = {'line-numbers': False, 'highlight-current-line': False}
+            self.assertEqual(load_preferences(path), defaults)
+            for settings in ({'line-numbers': True, 'highlight-current-line': True}, defaults):
+                save_preferences(path, settings)
+                self.assertEqual(load_preferences(path), settings)
+            path.write_text('{"line-numbers": true, "highlight-current-line": "false"}')
+            self.assertEqual(load_preferences(path), {'line-numbers': True, 'highlight-current-line': False})
+            for invalid in ('{broken', '[]', '\ufffd'):
+                path.write_text(invalid)
+                with patch('sys.stderr'):
+                    self.assertEqual(load_preferences(path), defaults)
+            path.unlink()
+            path.parent.rmdir()
+            path.parent.write_text('not a directory')
+            with self.assertRaises(OSError):
+                save_preferences(path, defaults)
+
     def test_image_files_are_decoded_before_text(self):
         jpeg = (Path(__file__).parent / 'tests/fixtures/image.jpg').read_bytes()
         with tempfile.TemporaryDirectory() as directory:

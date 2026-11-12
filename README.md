@@ -36,4 +36,4 @@ See [evidence/NOTES.md](evidence/NOTES.md). Extracted upstream UI resources are 
 
 ## Display options
 
-The header menu includes **Display Line Numbers** and **Highlight Current Line**. Both start off and apply to every tab in the current window, including new tabs. Settings last until the window closes. Numbers count document lines, not wrapped rows; the current-line highlight covers the entire logical line. These decorations do not change saved documents.
+The header menu includes **Display Line Numbers** and **Highlight Current Line**. Both default to off and apply to every tab in the current window, including new tabs. Changes are saved immediately and restored on the next launch. Settings live in `$XDG_CONFIG_HOME/image-text-editor/settings.json` (normally `~/.config/image-text-editor/settings.json`). Numbers count document lines, not wrapped rows; the current-line highlight covers the entire logical line. These decorations do not change saved documents.

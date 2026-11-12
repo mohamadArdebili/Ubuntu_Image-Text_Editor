@@ -12,6 +12,28 @@ gi.require_version('Graphene', '1.0')
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
 
+def load_preferences(path):
+    settings = {'line-numbers': False, 'highlight-current-line': False}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('Expected a settings object')
+        for key in settings:
+            if type(data.get(key)) is bool:
+                settings[key] = data[key]
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as error:
+        print(f'Could not read display settings: {error}', file=sys.stderr)
+    return settings
+
+
+def save_preferences(path, settings):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Gio.File.new_for_path(str(path)).replace_contents(
+        json.dumps(settings).encode('utf-8'), None, False, Gio.FileCreateFlags.PRIVATE, None)
+
+
 def parts(buffer):
     result, text = [], []
     pos = buffer.get_start_iter()
@@ -173,6 +195,8 @@ class Page(Gtk.ScrolledWindow):
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title='Image Text Editor', default_width=1000, default_height=720)
+        self.preferences_path = Path(GLib.get_user_config_dir()) / 'image-text-editor' / 'settings.json'
+        preferences = load_preferences(self.preferences_path)
         self.tabs = Adw.TabView(vexpand=True)
         self.tabs.connect('close-page', self.close_page)
         self.tabs.connect('notify::selected-page', lambda *_: self.current() and self.position(self.current()))
@@ -188,7 +212,7 @@ class Window(Adw.ApplicationWindow):
             menu.append(label, 'win.' + action)
         for label, name in [('Display Line Numbers', 'line-numbers'),
                             ('Highlight Current Line', 'highlight-current-line')]:
-            action = Gio.SimpleAction.new_stateful(name, None, GLib.Variant('b', False))
+            action = Gio.SimpleAction.new_stateful(name, None, GLib.Variant('b', preferences[name]))
             action.connect('activate', lambda a, p: a.change_state(GLib.Variant('b', not a.get_state().get_boolean())))
             action.connect('change-state', self.display_option)
             self.add_action(action)
@@ -230,6 +254,12 @@ class Window(Adw.ApplicationWindow):
             else:
                 view.highlight_current_line = state.get_boolean()
             view.refresh_decorations()
+        settings = {name: self.lookup_action(name).get_state().get_boolean()
+                    for name in ('line-numbers', 'highlight-current-line')}
+        try:
+            save_preferences(self.preferences_path, settings)
+        except (GLib.Error, OSError) as error:
+            self.error(f'Display settings could not be saved: {error}')
 
     def current(self):
         tab = self.tabs.get_selected_page()
