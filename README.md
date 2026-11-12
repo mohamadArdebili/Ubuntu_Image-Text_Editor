@@ -18,7 +18,7 @@ Uses Ubuntu's system Python, PyGObject, GTK 4 and libadwaita, already present on
 - Plain UTF-8 text files remain plain text. Adding an image prompts for a `.jot` destination on save.
 - Closing modified tabs or windows prompts to save, discard, or cancel. Saves use GIO atomic replacement.
 
-This is a focused recreation, not a complete GNOME Text Editor fork. It does not include syntax highlighting, session recovery, image resizing, or rich document export. Images display at their original size. Save work explicitly; there is no crash recovery. Image clipboard formats are supported; copying an image file in Files is a different clipboard operation.
+This is a focused recreation, not a complete GNOME Text Editor fork. It does not include syntax highlighting or rich document export. Save work explicitly; recovery snapshots supplement normal saving. Image clipboard formats are supported; copying an image file in Files is a different clipboard operation.
 
 ## Checks
 
@@ -37,3 +37,12 @@ See [evidence/NOTES.md](evidence/NOTES.md). Extracted upstream UI resources are 
 ## Display options
 
 The header menu includes **Display Line Numbers** and **Highlight Current Line**. Both default to off and apply to every tab in the current window, including new tabs. Changes are saved immediately and restored on the next launch. Settings live in `$XDG_CONFIG_HOME/image-text-editor/settings.json` (normally `~/.config/image-text-editor/settings.json`). Numbers count document lines, not wrapped rows; the current-line highlight covers the entire logical line. These decorations do not change saved documents.
+
+## Images and recovery
+
+- Click an image (or place the cursor beside it) to reveal four corner handles. Drag a handle to preview a proportional resize; release to apply it, or press **Escape** to cancel. The image stays anchored in the text flow and surrounding text reflows on release.
+- **Resize Image…** in the header menu resizes the image immediately before or after the cursor. Enter a width in pixels; height follows the original aspect ratio. Resizing resamples the embedded image, so repeated resizing can reduce quality. Save as `.jot` to keep the resized result; source image files stay unchanged.
+- Drag local image files from Files, or an image supplied as an image by another application, onto the editor to insert at the drop position. Multiple images insert in file-list order. All dropped files must decode successfully before insertion. Text drops retain GTK's normal behavior; remote image URLs and document-file drops are not supported.
+- Every five seconds, modified tabs receive private recovery copies under `$XDG_STATE_HOME/image-text-editor/recovery/` (normally `~/.local/state/image-text-editor/recovery/`). Text and embedded images are included. Original documents are not overwritten by autosave.
+- After an unexpected exit, recovery copies automatically reopen as modified **Recovered document** tabs. Use Save As to choose their destination. Saving or explicitly discarding a tab removes its recovery copy; Cancel keeps it. Unreadable recovery files stay on disk and produce an error.
+- Changes since the latest successful snapshot can be lost. Large image documents may briefly pause the editor during snapshot encoding; recovery copies are local files, not encrypted storage.

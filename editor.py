@@ -4,12 +4,14 @@ import base64
 import json
 from pathlib import Path
 import sys
+import uuid
 import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 gi.require_version('Graphene', '1.0')
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk
 
 
 def load_preferences(path):
@@ -32,6 +34,41 @@ def save_preferences(path, settings):
     path.parent.mkdir(parents=True, exist_ok=True)
     Gio.File.new_for_path(str(path)).replace_contents(
         json.dumps(settings).encode('utf-8'), None, False, Gio.FileCreateFlags.PRIVATE, None)
+
+
+def resize_texture(texture, width):
+    height = max(1, round(texture.get_height() * width / texture.get_width()))
+    if not 1 <= width <= 16384 or height > 16384:
+        raise ValueError('Image dimensions must be between 1 and 16384 pixels.')
+    pixels = Gdk.pixbuf_get_from_texture(texture)
+    scaled = pixels.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+    return Gdk.Texture.new_for_pixbuf(scaled)
+
+
+def corner_width(width, height, dx, dy, sx, sy):
+    ratio = height / width
+    proposed = round(width + (sx * dx + sy * dy * ratio) / (1 + ratio * ratio))
+    return max(1, min(proposed, 16384, int(16384 / ratio)))
+
+
+def replace_image(buffer, mark, image, width):
+    start = buffer.get_iter_at_mark(mark)
+    if start.get_paintable() != image:
+        raise ValueError('The image changed while resizing.')
+    if width == image.get_width():
+        return
+    resized = resize_texture(image, width)
+    end = start.copy()
+    end.forward_char()
+    buffer.begin_user_action()
+    buffer.delete(start, end)
+    buffer.insert_paintable(start, resized)
+    buffer.end_user_action()
+
+
+def save_recovery(buffer, path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    save_preferences(path, {'format': 'image-text-1', 'parts': parts(buffer)})
 
 
 def parts(buffer):
@@ -123,10 +160,78 @@ class EditorView(Gtk.TextView):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.highlight_current_line = False
+        self.image_drag = None
         self.numbers = LineNumbers(self)
         self.set_gutter(Gtk.TextWindowType.LEFT, self.numbers)
         self.get_buffer().connect('changed', self.refresh_decorations)
         self.get_buffer().connect('notify::cursor-position', self.refresh_decorations)
+        self.resize_gesture = Gtk.GestureDrag(button=1)
+        self.resize_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self.resize_gesture.connect('drag-begin', self.resize_begin)
+        self.resize_gesture.connect('drag-update', self.resize_update)
+        self.resize_gesture.connect('drag-end', self.resize_end)
+        self.resize_gesture.connect('cancel', lambda *_: self.cancel_resize())
+        self.add_controller(self.resize_gesture)
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect('key-pressed', self.resize_key)
+        self.add_controller(keys)
+
+    def selected_image(self):
+        buffer = self.get_buffer()
+        pos = buffer.get_iter_at_mark(buffer.get_insert())
+        if not pos.get_paintable():
+            pos.backward_char()
+        return pos if pos.get_paintable() else None
+
+    def resize_begin(self, gesture, x, y):
+        pos = self.selected_image()
+        if pos is not None:
+            rect = self.get_iter_location(pos)
+            image = pos.get_paintable()
+            bx, by = self.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
+            for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+                cx = rect.x + (image.get_width() if sx == 1 else 0)
+                cy = rect.y + (image.get_height() if sy == 1 else 0)
+                if abs(bx - cx) <= 7 and abs(by - cy) <= 7:
+                    self.image_drag = (self.get_buffer().create_mark(None, pos, True), image, rect, sx, sy, image.get_width())
+                    gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+                    self.set_cursor_from_name('nwse-resize' if sx == sy else 'nesw-resize')
+                    return
+        gesture.set_state(Gtk.EventSequenceState.DENIED)
+
+    def resize_update(self, gesture, dx, dy):
+        if self.image_drag:
+            mark, image, rect, sx, sy, _ = self.image_drag
+            width = corner_width(image.get_width(), image.get_height(), dx, dy, sx, sy)
+            self.image_drag = (mark, image, rect, sx, sy, width)
+            self.queue_draw()
+
+    def cancel_resize(self):
+        if self.image_drag:
+            self.get_buffer().delete_mark(self.image_drag[0])
+            self.image_drag = None
+            self.set_cursor_from_name(None)
+            self.queue_draw()
+
+    def resize_key(self, controller, key, code, state):
+        if self.image_drag and key == Gdk.KEY_Escape:
+            self.cancel_resize()
+            self.resize_gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return True
+        return False
+
+    def resize_end(self, gesture, dx, dy):
+        if not self.image_drag:
+            return
+        self.resize_update(gesture, dx, dy)
+        mark, image, _, _, _, width = self.image_drag
+        try:
+            replace_image(self.get_buffer(), mark, image, width)
+        except (GLib.Error, ValueError) as error:
+            self.get_root().error(error)
+        finally:
+            self.cancel_resize()
 
     def refresh_decorations(self, *_):
         digits = len(str(self.get_buffer().get_line_count()))
@@ -144,12 +249,33 @@ class EditorView(Gtk.TextView):
             color = self.get_color()
             color.alpha = 0.07
             snapshot.append_color(color, Graphene.Rect().init(visible.x, y, visible.width, height))
+        if layer == Gtk.TextViewLayer.ABOVE_TEXT:
+            pos = self.selected_image()
+            if pos is None:
+                return
+            image = pos.get_paintable()
+            rect = self.get_iter_location(pos)
+            x, y, width, height = rect.x, rect.y, image.get_width(), image.get_height()
+            if self.image_drag:
+                _, image, rect, sx, sy, width = self.image_drag
+                height = max(1, round(image.get_height() * width / image.get_width()))
+                x = rect.x + (image.get_width() - width if sx == -1 else 0)
+                y = rect.y + (image.get_height() - height if sy == -1 else 0)
+            color = self.get_color()
+            for rx, ry, rw, rh in ((x, y, width, 1), (x, y + height, width, 1),
+                                   (x, y, 1, height), (x + width, y, 1, height)):
+                snapshot.append_color(color, Graphene.Rect().init(rx, ry, rw, rh))
+            for cx, cy in ((x, y), (x + width, y), (x, y + height), (x + width, y + height)):
+                snapshot.append_color(color, Graphene.Rect().init(cx - 5, cy - 5, 10, 10))
 
 
 class Page(Gtk.ScrolledWindow):
     def __init__(self, owner):
         super().__init__(hexpand=True, vexpand=True)
         self.owner, self.path = owner, None
+        self.recovery_path = owner.recovery_dir / f'{uuid.uuid4().hex}.jot'
+        self.recovery_pending = False
+        self.recovered = False
         self.buffer = Gtk.TextBuffer(enable_undo=True)
         self.view = EditorView(buffer=self.buffer, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                  left_margin=30, right_margin=30, top_margin=24, bottom_margin=24)
@@ -161,11 +287,72 @@ class Page(Gtk.ScrolledWindow):
         self.view.connect('paste-clipboard', self.paste)
         self.buffer.connect('modified-changed', lambda *_: self.title())
         self.buffer.connect('notify::cursor-position', lambda *_: owner.position(self))
+        self.buffer.connect('changed', self.changed)
+        target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        target.set_gtypes([Gdk.FileList, Gdk.Texture])
+        target.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        target.connect('drop', self.drop_image)
+        self.view.add_controller(target)
+
+    def changed(self, *_):
+        self.recovery_pending = True
+
+    def drop_image(self, target, value, x, y):
+        try:
+            if isinstance(value, Gdk.Texture):
+                images = [value]
+            else:
+                images = []
+                for file in value.get_files():
+                    path = file.get_path()
+                    if path is None:
+                        raise ValueError('Drop a local image file.')
+                    images.append(Gdk.Texture.new_from_filename(path))
+            if not images:
+                return False
+            bx, by = self.view.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
+            _, pos = self.view.get_iter_at_location(bx, by)
+            self.buffer.place_cursor(pos)
+            self.buffer.begin_user_action()
+            for image in images:
+                self.insert_image(image)
+            self.buffer.end_user_action()
+            return True
+        except (GLib.Error, ValueError) as error:
+            self.owner.error(error)
+            return False
 
     def title(self):
         tab = self.owner.tabs.get_page(self)
         if tab:
-            tab.set_title(('• ' if self.buffer.get_modified() else '') + (self.path.name if self.path else 'Untitled'))
+            tab.set_title(('• ' if self.buffer.get_modified() else '') + (self.path.name if self.path else ('Recovered document' if self.recovered else 'Untitled')))
+
+    def resize_image(self):
+        pos = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+        if not pos.get_paintable():
+            pos.backward_char()
+        image = pos.get_paintable()
+        if not image:
+            self.owner.error('Place the cursor immediately before or after an image, then choose Resize Image.')
+            return
+        mark = self.buffer.create_mark(None, pos, True)
+        dialog = Adw.MessageDialog(transient_for=self.owner, heading='Resize Image', body='Width in pixels. Aspect ratio is preserved.')
+        width = Gtk.SpinButton.new_with_range(1, 16384, 1)
+        width.set_value(image.get_width())
+        dialog.set_extra_child(width)
+        dialog.add_response('cancel', 'Cancel')
+        dialog.add_response('resize', 'Resize')
+        dialog.set_close_response('cancel')
+        def response(d, key):
+            try:
+                if key == 'resize':
+                    replace_image(self.buffer, mark, image, width.get_value_as_int())
+            except (GLib.Error, ValueError) as error:
+                self.owner.error(error)
+            finally:
+                self.buffer.delete_mark(mark)
+        dialog.connect('response', response)
+        dialog.present()
 
     def insert_image(self, texture):
         self.buffer.begin_user_action()
@@ -197,6 +384,8 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title='Image Text Editor', default_width=1000, default_height=720)
         self.preferences_path = Path(GLib.get_user_config_dir()) / 'image-text-editor' / 'settings.json'
         preferences = load_preferences(self.preferences_path)
+        self.recovery_dir = Path(GLib.get_user_state_dir()) / 'image-text-editor' / 'recovery'
+        self.recovery_error = False
         self.tabs = Adw.TabView(vexpand=True)
         self.tabs.connect('close-page', self.close_page)
         self.tabs.connect('notify::selected-page', lambda *_: self.current() and self.position(self.current()))
@@ -208,7 +397,7 @@ class Window(Adw.ApplicationWindow):
                                   ('insert-image-symbolic', 'Insert image', 'image')]:
             bar.pack_end(Gtk.Button(icon_name=icon, tooltip_text=tip, action_name='win.' + action))
         menu = Gio.Menu()
-        for label, action in [('Save As…', 'save-as'), ('Insert Image…', 'image'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
+        for label, action in [('Save As…', 'save-as'), ('Insert Image…', 'image'), ('Resize Image…', 'resize-image'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
             menu.append(label, 'win.' + action)
         for label, name in [('Display Line Numbers', 'line-numbers'),
                             ('Highlight Current Line', 'highlight-current-line')]:
@@ -232,6 +421,7 @@ class Window(Adw.ApplicationWindow):
         actions = {'new': lambda: self.new(), 'open': lambda: self.choose('open'),
                    'save': lambda: self.save_page(self.current()), 'save-as': lambda: self.choose('save', self.current()),
                    'image': lambda: self.choose('image', self.current()),
+                   'resize-image': lambda: self.current().resize_image(),
                    'paste': lambda: self.current().view.emit('paste-clipboard'),
                    'find': self.show_find, 'close': lambda: self.tabs.close_page(self.tabs.get_selected_page())}
         shortcuts = {'new': '<Control>n', 'open': '<Control>o', 'save': '<Control>s',
@@ -243,7 +433,45 @@ class Window(Adw.ApplicationWindow):
             if name in shortcuts:
                 app.set_accels_for_action('win.' + name, [shortcuts[name]])
         self.connect('close-request', self.close_window)
-        self.new()
+        self.restore_recovery()
+        if not self.tabs.get_n_pages():
+            self.new()
+
+    def restore_recovery(self):
+        for path in sorted(self.recovery_dir.glob('*.jot')):
+            try:
+                content = load(path)
+                page = self.new()
+                page.recovery_path = path
+                page.recovered = True
+                for item in content:
+                    if isinstance(item, str):
+                        page.buffer.insert(page.buffer.get_end_iter(), item)
+                    else:
+                        page.buffer.insert_paintable(page.buffer.get_end_iter(), item)
+                page.buffer.set_modified(True)
+                page.title()
+            except (GLib.Error, OSError, ValueError) as error:
+                self.error(f'Could not restore {path.name}. Recovery file retained: {error}')
+
+    def autosave(self):
+        for i in range(self.tabs.get_n_pages()):
+            page = self.tabs.get_nth_page(i).get_child()
+            if page.buffer.get_modified() and page.recovery_pending:
+                try:
+                    save_recovery(page.buffer, page.recovery_path)
+                    page.recovery_pending = False
+                    self.recovery_error = False
+                except (GLib.Error, OSError) as error:
+                    if not self.recovery_error:
+                        self.error(f'Autosave recovery failed: {error}')
+                    self.recovery_error = True
+
+    def clear_recovery(self, page):
+        try:
+            page.recovery_path.unlink(missing_ok=True)
+        except OSError as error:
+            self.error(f'Could not remove recovery copy: {error}')
 
     def display_option(self, action, state):
         action.set_state(state)
@@ -346,6 +574,7 @@ class Window(Adw.ApplicationWindow):
             save(page.buffer, path)
             page.path = path
             page.buffer.set_modified(False)
+            self.clear_recovery(page)
             page.title()
             if done:
                 done(True)
@@ -374,6 +603,8 @@ class Window(Adw.ApplicationWindow):
     def close_page(self, view, tab):
         page = tab.get_child()
         def finish(ok):
+            if ok:
+                self.clear_recovery(page)
             view.close_page_finish(tab, ok)
             if ok and view.get_n_pages() == 0:
                 self.new()
@@ -392,6 +623,8 @@ class Window(Adw.ApplicationWindow):
             if dirty:
                 self.confirm(dirty.pop(0), next_page)
             else:
+                for i in range(self.tabs.get_n_pages()):
+                    self.clear_recovery(self.tabs.get_nth_page(i).get_child())
                 self.destroy()
         next_page()
         return True
@@ -416,6 +649,19 @@ class Window(Adw.ApplicationWindow):
 class App(Adw.Application):
     def __init__(self):
         super().__init__(application_id='local.ImageTextEditor', flags=Gio.ApplicationFlags.HANDLES_OPEN)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        self.autosave_timer = GLib.timeout_add_seconds(5, self.autosave)
+
+    def autosave(self):
+        for window in self.get_windows():
+            window.autosave()
+        return GLib.SOURCE_CONTINUE
+
+    def do_shutdown(self):
+        GLib.source_remove(self.autosave_timer)
+        Adw.Application.do_shutdown(self)
 
     def do_activate(self):
         window = self.get_active_window() or Window(self)

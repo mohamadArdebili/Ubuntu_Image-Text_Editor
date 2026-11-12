@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
-from editor import App, Gdk, GLib, Gtk, Window, load, parts, save, load_preferences, save_preferences
+from editor import App, Gdk, GLib, Gtk, Window, load, parts, save, load_preferences, save_preferences, resize_texture, save_recovery, corner_width, replace_image
 
 
 class EditorTests(unittest.TestCase):
@@ -21,6 +21,9 @@ class EditorTests(unittest.TestCase):
         config = patch('editor.GLib.get_user_config_dir', return_value=str(self.root))
         config.start()
         self.addCleanup(config.stop)
+        state = patch('editor.GLib.get_user_state_dir', return_value=str(self.root / 'state'))
+        state.start()
+        self.addCleanup(state.stop)
         self.window = Window(self.app)
         self.page = self.window.current()
         self.texture = Gdk.MemoryTexture.new(2, 2, Gdk.MemoryFormat.R8G8B8A8,
@@ -121,8 +124,130 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(self.window.current().view.highlight_current_line)
         self.assertFalse(self.window.current().buffer.get_modified())
 
+    def test_recovery_survives_crash_and_clears_on_save(self):
+        self.page.buffer.set_text('Recover me فارسی')
+        self.page.insert_image(self.texture)
+        expected = parts(self.page.buffer)
+        self.window.autosave()
+        recovery = self.page.recovery_path
+        self.assertTrue(recovery.exists())
+        self.window.destroy()
+        self.window = Window(self.app)
+        restored = self.window.current()
+        self.assertEqual(parts(restored.buffer), expected)
+        self.assertTrue(restored.buffer.get_modified())
+        self.assertIsNone(restored.path)
+        self.assertTrue(self.window.save_page(restored, self.root / 'saved.jot'))
+        self.assertFalse(recovery.exists())
+
+    def test_recovery_cancel_preserves_and_discard_removes(self):
+        self.page.buffer.set_text('unsaved')
+        self.window.autosave()
+        recovery = self.page.recovery_path
+        self.window.confirm = lambda page, done: done(False)
+        self.window.tabs.close_page(self.window.tabs.get_selected_page())
+        self.assertTrue(recovery.exists())
+        self.window.confirm = lambda page, done: done(True)
+        self.window.tabs.close_page(self.window.tabs.get_selected_page())
+        self.assertFalse(recovery.exists())
+
+    def test_drop_texture_and_invalid_file(self):
+        self.assertTrue(self.page.drop_image(None, self.texture, 0, 0))
+        before = parts(self.page.buffer)
+        from editor import Gio
+        invalid = Gdk.FileList.new_from_list([Gio.File.new_for_path(str(self.root / 'missing.jpg'))])
+        with patch.object(self.window, 'error') as error:
+            self.assertFalse(self.page.drop_image(None, invalid, 0, 0))
+            error.assert_called_once()
+        self.assertEqual(parts(self.page.buffer), before)
+
+    def test_corner_drag_commit_and_cancel(self):
+        image = resize_texture(self.texture, 80)
+        self.page.insert_image(image)
+        self.page.buffer.set_modified(False)
+        view = self.page.view
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = 30, 24, 80, 80
+        from unittest.mock import Mock
+        gesture = Mock()
+        with patch.object(view, 'window_to_buffer_coords', side_effect=lambda win, x, y: (x, y)), \
+                patch.object(view, 'get_iter_location', return_value=rect):
+            view.resize_begin(gesture, 110, 104)
+            self.assertIsNotNone(view.image_drag)
+            view.resize_update(gesture, 20, 20)
+            self.assertFalse(self.page.buffer.get_modified())
+            view.resize_end(gesture, 20, 20)
+            self.assertEqual(view.selected_image().get_paintable().get_width(), 100)
+            self.assertTrue(self.page.buffer.get_modified())
+            self.assertTrue(self.page.recovery_pending)
+            self.page.buffer.set_modified(False)
+            view.resize_begin(gesture, 30, 24)
+            view.resize_update(gesture, -20, -20)
+            self.assertTrue(view.resize_key(None, Gdk.KEY_Escape, 0, 0))
+            view.resize_end(gesture, -20, -20)
+            self.assertEqual(view.selected_image().get_paintable().get_width(), 100)
+            self.assertFalse(self.page.buffer.get_modified())
+            view.resize_begin(gesture, 500, 500)
+            self.assertIsNone(view.image_drag)
+
 
 class StorageTests(unittest.TestCase):
+    def test_corner_geometry_and_image_replacement(self):
+        for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            self.assertEqual(corner_width(100, 50, sx * 20, sy * 10, sx, sy), 120)
+            self.assertEqual(corner_width(100, 50, -sx * 20, -sy * 10, sx, sy), 80)
+        self.assertEqual(corner_width(100, 200, 1e6, 1e6, 1, 1), 8192)
+        self.assertEqual(corner_width(100, 50, -1e6, -1e6, 1, 1), 1)
+        image = Gdk.Texture.new_from_filename(str(Path(__file__).parent / 'tests/fixtures/image.jpg'))
+        buffer = Gtk.TextBuffer()
+        buffer.set_text('before')
+        buffer.insert_paintable(buffer.get_end_iter(), image)
+        buffer.insert(buffer.get_end_iter(), 'after')
+        pos = buffer.get_iter_at_offset(6)
+        mark = buffer.create_mark(None, pos, True)
+        buffer.set_modified(False)
+        replace_image(buffer, mark, image, image.get_width())
+        self.assertFalse(buffer.get_modified())
+        replace_image(buffer, mark, image, 10)
+        self.assertTrue(buffer.get_modified())
+        self.assertEqual(parts(buffer)[0], {'text': 'before'})
+        self.assertEqual(parts(buffer)[-1], {'text': 'after'})
+        self.assertEqual(buffer.get_iter_at_mark(mark).get_paintable().get_width(), 10)
+        before = parts(buffer)
+        with self.assertRaises(ValueError):
+            replace_image(buffer, mark, image, 20)
+        self.assertEqual(parts(buffer), before)
+        buffer.delete_mark(mark)
+
+    def test_resize_and_recovery_roundtrip(self):
+        image = Gdk.Texture.new_from_filename(str(Path(__file__).parent / 'tests/fixtures/image.jpg'))
+        resized = resize_texture(image, 10)
+        self.assertEqual((resized.get_width(), resized.get_height()), (10, 10))
+        wide = Gdk.MemoryTexture.new(4, 2, Gdk.MemoryFormat.R8G8B8A8,
+                                     GLib.Bytes.new(bytes([255, 0, 0, 255]) * 8), 16)
+        self.assertEqual(resize_texture(wide, 6).get_height(), 3)
+        for width in (0, -1, 16385):
+            with self.assertRaises(ValueError):
+                resize_texture(image, width)
+        buffer = Gtk.TextBuffer()
+        buffer.set_text('Recovered text فارسی\n')
+        buffer.insert_paintable(buffer.get_end_iter(), resized)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'recovery/session.jot'
+            save_recovery(buffer, path)
+            restored = load(path)
+            self.assertEqual(restored[0], 'Recovered text فارسی\n')
+            self.assertEqual(restored[1].get_width(), 10)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            buffer.set_text('new snapshot')
+            save_recovery(buffer, path)
+            self.assertEqual(load(path), ['new snapshot'])
+            original = path.read_bytes()
+            with patch('editor.Gio.File.new_for_path', side_effect=OSError('Disk full')):
+                with self.assertRaises(OSError):
+                    save_recovery(buffer, path)
+            self.assertEqual(path.read_bytes(), original)
+
     def test_preferences_roundtrip_and_invalid_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config/settings.json'
