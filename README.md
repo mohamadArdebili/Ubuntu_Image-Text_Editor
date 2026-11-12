@@ -10,7 +10,8 @@ Run from this directory:
 
 Uses Ubuntu's system Python, PyGObject, GTK 4 and libadwaita, already present on the inspected machine. No pip packages required.
 
-- Type text normally. Paste a copied image or screenshot with **Ctrl+V**, or use **Insert image** in the header.
+- Type text normally. Paste a copied image or screenshot with **Ctrl+V**, or use **Insert Image…** in the menu (also available in the header) to insert a downloaded image into the current tab.
+- Opening a supported image through **Ctrl+O** or a file argument creates a new unsaved image document. Save it as `.jot`; the original image stays untouched.
 - **Ctrl+N** opens a tab; **Ctrl+O** opens a document; **Ctrl+S** saves; **Ctrl+Shift+S** saves under another name.
 - **Ctrl+F** finds text; Enter finds the next occurrence. **Ctrl+W** closes the tab.
 - Image documents use **`.jot`**, a JSON file containing text and embedded PNG images. Keep this extension when saving images.

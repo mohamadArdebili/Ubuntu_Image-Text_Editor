@@ -31,7 +31,15 @@ def parts(buffer):
 
 
 def load(path):
-    text = path.read_text(encoding='utf-8')
+    data = path.read_bytes()
+    if path.suffix.lower() != '.jot':
+        content_type, _ = Gio.content_type_guess(str(path), data[:4096])
+        if Gio.content_type_get_mime_type(content_type).startswith('image/'):
+            return [Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))]
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise ValueError('This file is not a supported image or a UTF-8 text document.') from error
     if path.suffix.lower() != '.jot':
         return [text]
     data = json.loads(text)
@@ -176,7 +184,7 @@ class Window(Adw.ApplicationWindow):
                                   ('insert-image-symbolic', 'Insert image', 'image')]:
             bar.pack_end(Gtk.Button(icon_name=icon, tooltip_text=tip, action_name='win.' + action))
         menu = Gio.Menu()
-        for label, action in [('Save As…', 'save-as'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
+        for label, action in [('Save As…', 'save-as'), ('Insert Image…', 'image'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
             menu.append(label, 'win.' + action)
         for label, name in [('Display Line Numbers', 'line-numbers'),
                             ('Highlight Current Line', 'highlight-current-line')]:
@@ -286,6 +294,7 @@ class Window(Adw.ApplicationWindow):
 
     def open_path(self, path):
         content = load(path)
+        imported_image = len(content) == 1 and isinstance(content[0], Gdk.Texture) and path.suffix.lower() != '.jot'
         page = self.new()
         for item in content:
             end = page.buffer.get_end_iter()
@@ -293,8 +302,8 @@ class Window(Adw.ApplicationWindow):
                 page.buffer.insert(end, item)
             else:
                 page.buffer.insert_paintable(end, item)
-        page.path = path
-        page.buffer.set_modified(False)
+        page.path = None if imported_image else path
+        page.buffer.set_modified(imported_image)
         page.title()
         page.buffer.place_cursor(page.buffer.get_start_iter())
 

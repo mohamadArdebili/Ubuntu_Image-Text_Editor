@@ -64,6 +64,19 @@ class EditorTests(unittest.TestCase):
                 self.window.open_path(path)
             self.assertEqual(self.window.tabs.get_n_pages(), count)
 
+    def test_open_image_creates_unsaved_document(self):
+        source = Path(__file__).parent / 'tests/fixtures/image.jpg'
+        original = source.read_bytes()
+        self.window.open_path(source)
+        page = self.window.current()
+        self.assertIsNone(page.path)
+        self.assertTrue(page.buffer.get_modified())
+        self.assertIn('png', parts(page.buffer)[0])
+        destination = self.root / 'imported.jot'
+        self.assertTrue(self.window.save_page(page, destination))
+        self.assertEqual(load(destination)[0].get_width(), 2)
+        self.assertEqual(source.read_bytes(), original)
+
     def test_close_cancel_keeps_modified_tab(self):
         self.page.buffer.set_text('unsaved')
         self.window.confirm = lambda page, done: done(False)
@@ -95,6 +108,29 @@ class EditorTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_image_files_are_decoded_before_text(self):
+        jpeg = (Path(__file__).parent / 'tests/fixtures/image.jpg').read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ('download.jpg', 'download.JPEG', 'download'):
+                with self.subTest(name=name):
+                    path = Path(directory) / name
+                    path.write_bytes(jpeg)
+                    image, = load(path)
+                    self.assertIsInstance(image, Gdk.Texture)
+                    self.assertEqual((image.get_width(), image.get_height()), (2, 2))
+                    self.assertEqual(path.read_bytes(), jpeg)
+            png = Path(directory) / 'screenshot.png'
+            image.save_to_png(str(png))
+            self.assertIsInstance(load(png)[0], Gdk.Texture)
+            broken = Path(directory) / 'broken.jpg'
+            broken.write_bytes(b'\xff\xd8\xff\xe0broken')
+            with self.assertRaises(GLib.Error):
+                load(broken)
+            binary = Path(directory) / 'binary.dat'
+            binary.write_bytes(b'\xff\x00unsupported')
+            with self.assertRaisesRegex(ValueError, 'UTF-8 text document'):
+                load(binary)
+
     def test_storage_without_display(self):
         buffer = Gtk.TextBuffer()
         buffer.set_text('Before فارسی\n')
