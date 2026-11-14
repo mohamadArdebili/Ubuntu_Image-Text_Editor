@@ -124,6 +124,37 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(self.window.current().view.highlight_current_line)
         self.assertFalse(self.window.current().buffer.get_modified())
 
+    def test_font_size_actions_and_persistence(self):
+        self.page.buffer.set_text('Text فارسی')
+        self.page.buffer.set_modified(False)
+        original = parts(self.page.buffer)
+        other = self.window.new()
+        self.window.lookup_action('font-increase').activate(None)
+        self.assertEqual(self.window.font_size, 13)
+        for page in (self.page, other, self.window.new()):
+            self.assertIn('13pt', page.view.font_css.to_string())
+        self.assertEqual(parts(self.page.buffer), original)
+        self.assertFalse(self.page.buffer.get_modified())
+        self.window.lookup_action('line-numbers').activate(None)
+        self.assertEqual(load_preferences(self.window.preferences_path)['font-size'], 13)
+        for action, keys in [('font-increase', ('<Control>plus', '<Control>equal', '<Control>KP_Add')),
+                             ('font-decrease', ('<Control>minus', '<Control>KP_Subtract'))]:
+            self.assertEqual(set(self.app.get_accels_for_action('win.' + action)), set(keys))
+        self.window.destroy()
+        self.window = Window(self.app)
+        self.assertEqual(self.window.font_size, 13)
+        self.assertTrue(self.window.lookup_action('line-numbers').get_state().get_boolean())
+        self.window.lookup_action('font-decrease').activate(None)
+        self.assertEqual(self.window.font_size, 12)
+        self.window.change_font_size(-1000)
+        self.assertEqual(self.window.font_size, 6)
+        self.window.lookup_action('font-decrease').activate(None)
+        self.assertEqual(self.window.font_size, 6)
+        self.window.change_font_size(1000)
+        self.assertEqual(self.window.font_size, 72)
+        self.window.lookup_action('font-increase').activate(None)
+        self.assertEqual(self.window.font_size, 72)
+
     def test_recovery_survives_crash_and_clears_on_save(self):
         self.page.buffer.set_text('Recover me فارسی')
         self.page.insert_image(self.texture)
@@ -251,13 +282,17 @@ class StorageTests(unittest.TestCase):
     def test_preferences_roundtrip_and_invalid_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config/settings.json'
-            defaults = {'line-numbers': False, 'highlight-current-line': False}
+            defaults = {'line-numbers': False, 'highlight-current-line': False, 'font-size': 12}
             self.assertEqual(load_preferences(path), defaults)
             for settings in ({'line-numbers': True, 'highlight-current-line': True}, defaults):
                 save_preferences(path, settings)
-                self.assertEqual(load_preferences(path), settings)
+                self.assertEqual(load_preferences(path), {**defaults, **settings})
             path.write_text('{"line-numbers": true, "highlight-current-line": "false"}')
-            self.assertEqual(load_preferences(path), {'line-numbers': True, 'highlight-current-line': False})
+            self.assertEqual(load_preferences(path), {**defaults, 'line-numbers': True})
+            for size in (6, 13, 72, 0, 73, '18', True, None, 12.5):
+                save_preferences(path, {**defaults, 'font-size': size})
+                expected = size if type(size) is int and 6 <= size <= 72 else 12
+                self.assertEqual(load_preferences(path)['font-size'], expected)
             for invalid in ('{broken', '[]', '\ufffd'):
                 path.write_text(invalid)
                 with patch('sys.stderr'):

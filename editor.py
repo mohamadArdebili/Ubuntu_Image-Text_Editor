@@ -15,14 +15,17 @@ from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk
 
 
 def load_preferences(path):
-    settings = {'line-numbers': False, 'highlight-current-line': False}
+    settings = {'line-numbers': False, 'highlight-current-line': False, 'font-size': 12}
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(data, dict):
             raise ValueError('Expected a settings object')
-        for key in settings:
+        for key in ('line-numbers', 'highlight-current-line'):
             if type(data.get(key)) is bool:
                 settings[key] = data[key]
+        size = data.get('font-size')
+        if type(size) is int and 6 <= size <= 72:
+            settings['font-size'] = size
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as error:
@@ -160,6 +163,8 @@ class EditorView(Gtk.TextView):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.highlight_current_line = False
+        self.font_css = Gtk.CssProvider()
+        self.get_style_context().add_provider(self.font_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.image_drag = None
         self.numbers = LineNumbers(self)
         self.set_gutter(Gtk.TextWindowType.LEFT, self.numbers)
@@ -176,6 +181,11 @@ class EditorView(Gtk.TextView):
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         keys.connect('key-pressed', self.resize_key)
         self.add_controller(keys)
+
+    def set_font_size(self, size):
+        self.font_css.load_from_string(f'textview {{ font-size: {size}pt; }}')
+        self.queue_resize()
+        GLib.idle_add(self.refresh_decorations)
 
     def selected_image(self):
         buffer = self.get_buffer()
@@ -279,6 +289,7 @@ class Page(Gtk.ScrolledWindow):
         self.buffer = Gtk.TextBuffer(enable_undo=True)
         self.view = EditorView(buffer=self.buffer, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                  left_margin=30, right_margin=30, top_margin=24, bottom_margin=24)
+        self.view.set_font_size(owner.font_size)
         self.view.numbers.set_visible(owner.lookup_action('line-numbers').get_state().get_boolean())
         self.view.highlight_current_line = owner.lookup_action('highlight-current-line').get_state().get_boolean()
         self.view.refresh_decorations()
@@ -384,6 +395,7 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title='Image Text Editor', default_width=1000, default_height=720)
         self.preferences_path = Path(GLib.get_user_config_dir()) / 'image-text-editor' / 'settings.json'
         preferences = load_preferences(self.preferences_path)
+        self.font_size = preferences['font-size']
         self.recovery_dir = Path(GLib.get_user_state_dir()) / 'image-text-editor' / 'recovery'
         self.recovery_error = False
         self.tabs = Adw.TabView(vexpand=True)
@@ -399,6 +411,8 @@ class Window(Adw.ApplicationWindow):
         menu = Gio.Menu()
         for label, action in [('Save As…', 'save-as'), ('Insert Image…', 'image'), ('Resize Image…', 'resize-image'), ('Paste', 'paste'), ('Find…', 'find'), ('Close Tab', 'close')]:
             menu.append(label, 'win.' + action)
+        menu.append('Larger Text', 'win.font-increase')
+        menu.append('Smaller Text', 'win.font-decrease')
         for label, name in [('Display Line Numbers', 'line-numbers'),
                             ('Highlight Current Line', 'highlight-current-line')]:
             action = Gio.SimpleAction.new_stateful(name, None, GLib.Variant('b', preferences[name]))
@@ -422,6 +436,8 @@ class Window(Adw.ApplicationWindow):
                    'save': lambda: self.save_page(self.current()), 'save-as': lambda: self.choose('save', self.current()),
                    'image': lambda: self.choose('image', self.current()),
                    'resize-image': lambda: self.current().resize_image(),
+                   'font-increase': lambda: self.change_font_size(1),
+                   'font-decrease': lambda: self.change_font_size(-1),
                    'paste': lambda: self.current().view.emit('paste-clipboard'),
                    'find': self.show_find, 'close': lambda: self.tabs.close_page(self.tabs.get_selected_page())}
         shortcuts = {'new': '<Control>n', 'open': '<Control>o', 'save': '<Control>s',
@@ -432,6 +448,8 @@ class Window(Adw.ApplicationWindow):
             self.add_action(action)
             if name in shortcuts:
                 app.set_accels_for_action('win.' + name, [shortcuts[name]])
+        app.set_accels_for_action('win.font-increase', ['<Control>plus', '<Control>equal', '<Control>KP_Add'])
+        app.set_accels_for_action('win.font-decrease', ['<Control>minus', '<Control>KP_Subtract'])
         self.connect('close-request', self.close_window)
         self.restore_recovery()
         if not self.tabs.get_n_pages():
@@ -482,8 +500,21 @@ class Window(Adw.ApplicationWindow):
             else:
                 view.highlight_current_line = state.get_boolean()
             view.refresh_decorations()
+        self.save_display_preferences()
+
+    def change_font_size(self, step):
+        size = max(6, min(72, self.font_size + step))
+        if size == self.font_size:
+            return
+        self.font_size = size
+        for i in range(self.tabs.get_n_pages()):
+            self.tabs.get_nth_page(i).get_child().view.set_font_size(size)
+        self.save_display_preferences()
+
+    def save_display_preferences(self):
         settings = {name: self.lookup_action(name).get_state().get_boolean()
                     for name in ('line-numbers', 'highlight-current-line')}
+        settings['font-size'] = self.font_size
         try:
             save_preferences(self.preferences_path, settings)
         except (GLib.Error, OSError) as error:
